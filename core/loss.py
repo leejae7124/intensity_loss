@@ -134,6 +134,10 @@ class Intensity(nn.Module):
         """
         if self.cam_calib == "none":
             return cam_map
+        print("calib called | grad_enabled=", torch.is_grad_enabled(),
+            "| collect=", self._collect_this_epoch,
+            "| cnt=", int(self.epoch_cnt.item()),
+            "| scale=", float(self.scale.item()))
 
         cam = cam_map.clamp_min(0)
         B, S = cam.size(0), cam.size(1)
@@ -145,6 +149,8 @@ class Intensity(nn.Module):
                 cur = self._batch_p95(cam_flat).clamp_min(self.eps)
                 self.epoch_sum.add_(cur)
                 self.epoch_cnt.add_(1)
+                if self.epoch_cnt.item() == 1:
+                    print("[stats] first update, cur=", float(cur.item()))
 
         # ✅ 정규화는 “현재 scale”로만 (epoch 중에는 고정)
         cam = cam / (self.scale + self.eps)
@@ -195,7 +201,7 @@ class Intensity_CE(nn.Module):
 
         # ce_intensity 모드에서 cam_map이 없으면 “조용히” 넘어가면 디버깅이 지옥이라,
         # 강하게 에러 내는 걸 추천
-        if self.lambda_intensity > 0:
+        if self.lambda_intensity > 0: #lambda가 0 이상일 때만 호출.
             if cam_map is None or saliency_map is None:
                 raise RuntimeError("ce_intensity 모드인데 cam_map/saliency_map이 전달되지 않았습니다.")
             align = self.intensity_loss(cam_map, saliency_map)

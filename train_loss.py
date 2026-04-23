@@ -52,7 +52,7 @@ def train_epoch(epoch, data_loader, model, criterion, optimizer, opt, class_name
     print("# ---------------------------------------------------------------------- #")
     print('Training at epoch {}'.format(epoch))
 
-    # epoch 시작 직후
+    # epoch 시작 직후, epoch 단위 CAM 통계를 쓰기 위한 작업.
     if opt.loss_func == "ce_intensity":
         criterion.intensity_loss.begin_epoch(epoch)
 
@@ -80,8 +80,27 @@ def train_epoch(epoch, data_loader, model, criterion, optimizer, opt, class_name
         # print("video_id: ", video_id)
         data_time.update(time.time() - end_time)
 
+        # warmup_epoch는 1로 둔다고 가정 (epoch 번호가 1부터 시작하므로 epoch==1이 첫 epoch)
+        warmup = (opt.loss_func == "ce_intensity" and epoch == 1)
+
+        if warmup:
+            # 1) CAM 생성 (grad enabled 상태, model.train 상태)
+            y_pred, alpha, beta, gamma, cam_map = model(
+                visual, audio, target_class=target, compute_gradcam=True
+            )
+
+            # 2) ✅ 통계만 누적 (detach로 그래프 부담 줄임)
+            _ = criterion.intensity_loss._calibrate_cam(cam_map.detach())
+
+            # 3) ✅ 업데이트는 CE만
+            output = y_pred
+            loss = criterion.cls_loss(y_pred, target)  # Intensity_CE 내부 CE 모듈 사용
+        else:
+            output, loss = run_model_loss(opt, [visual, target, audio, saliency_map],
+                                        model, criterion, i, print_attention=False)
+
         # run_model()으로부터 loss를 받아서 backprop -> run_model()에 alignment loss 작성 필요해보임
-        output, loss = run_model_loss(opt, [visual, target, audio, saliency_map], model, criterion, i, print_attention=False)
+        # output, loss = run_model_loss(opt, [visual, target, audio, saliency_map], model, criterion, i, print_attention=False)
 
         iter = (epoch - 1) * len(data_loader) + (i + 1)   # ✅ iter 먼저 정의
 

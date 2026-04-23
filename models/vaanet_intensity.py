@@ -211,7 +211,7 @@ class VAANet_intensity(VisualStream):
             w = grads.mean(dim=(2, 3), keepdim=True)
             cam2 = torch.relu((w * A).sum(dim=1))   # [N, H, W]
 
-        cam2 = cam2 / (cam2.amax(dim=(1, 2), keepdim=True) + 1e-6)
+        # cam2 = cam2 / (cam2.amax(dim=(1, 2), keepdim=True) + 1e-6) #샘플별로 정규화하는 코드
 
         cam2_up = torch.nn.functional.interpolate(
             cam2.unsqueeze(1),
