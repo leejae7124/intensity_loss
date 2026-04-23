@@ -3,7 +3,27 @@ import torch
 import torch.nn as nn
 from core.utils import AverageMeter, process_data_item, calculate_accuracy
 
-# (macro f1 함수는 그대로 두면 됨)
+@torch.no_grad()
+def compute_macro_f1(y_true: torch.Tensor, y_pred: torch.Tensor, num_classes: int) -> float:
+    """
+    y_true, y_pred: shape [N], int64
+    macro-F1 = (1/C) * Σ_c F1_c
+    F1_c = 2*TP / (2*TP + FP + FN)
+    """
+    f1_sum = 0.0
+    eps = 1e-12
+
+    for c in range(num_classes):
+        tp = ((y_pred == c) & (y_true == c)).sum().item()
+        fp = ((y_pred == c) & (y_true != c)).sum().item()
+        fn = ((y_pred != c) & (y_true == c)).sum().item()
+
+        denom = 2 * tp + fp + fn
+        f1_c = (2 * tp) / (denom + eps) if denom > 0 else 0.0
+        f1_sum += f1_c
+
+    return f1_sum / max(num_classes, 1)
+
 
 @torch.no_grad()
 def test_epoch(data_loader, model, criterion, opt):
