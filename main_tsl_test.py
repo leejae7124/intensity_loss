@@ -1,8 +1,8 @@
 import torch
 from torch.cuda import device_count
 
-from opts_tsl import parse_opts
-from core.model import generate_model_mean_norm
+from opts_tsl_school import parse_opts
+from core.model import generate_model_intensity
 from core.loss import get_loss
 from core.utils import local2global_path, get_spatial_transform, get_saliency_transform
 from core.dataset2 import get_test_set, get_data_loader
@@ -41,7 +41,7 @@ def main():
     test_loader = get_data_loader(opt, test_data, shuffle=False)
 
     # model
-    model, parameters = generate_model_mean_norm(opt)
+    model, parameters = generate_model_intensity(opt)
     criterion = get_loss(opt).cuda()
 
     # checkpoint load
