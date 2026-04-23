@@ -1,7 +1,7 @@
 
 #saliency 적용
 import torch
-from opts_tsl import parse_opts
+from opts_tsl_school import parse_opts
 
 from core.model import generate_model_intensity
 from core.loss import get_loss
