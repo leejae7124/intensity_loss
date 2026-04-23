@@ -5,3 +5,11 @@
 *.pt
 *.ckpt
 *.log
+
+# .gitignore 수정
+__pycache__/
+*.pyc
+nohup.out
+*.swp
+.nfs*
+tools/annotations/tsl/results/
