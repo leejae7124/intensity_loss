@@ -57,7 +57,8 @@ class VAANet_intensity(VisualStream):
         self._gc_enable = False
         self._gc_activ = None
 
-        target = self._find_last_conv(self.resnet)
+        # target = self._find_last_conv(self.resnet)
+        target = self.conv0
         self._gc_handle = target.register_forward_hook(self._gc_save_activation)
 
     def _find_last_conv(self, module: nn.Module) -> nn.Module:
@@ -69,17 +70,23 @@ class VAANet_intensity(VisualStream):
             raise RuntimeError("No Conv2d/Conv3d found in self.resnet for Grad-CAM target layer.")
         return last
 
-    def _gc_save_activation(self, module, input, output): #module: hook을 건 레이어, input: 그 레이어에 들어온 입력, out: 그 레이어의 출력
-        if not self._gc_enable: #gc_enable이 false면 아무것도 안 하고 끝
+    # def _gc_save_activation(self, module, input, output): #module: hook을 건 레이어, input: 그 레이어에 들어온 입력, out: 그 레이어의 출력
+    #     if not self._gc_enable: #gc_enable이 false면 아무것도 안 하고 끝
+    #         return
+    #     # Grad-CAM용 activation을 "그래프에 붙는" 텐서로 교체
+    #     out_det = output.detach()
+    #     out_det.requires_grad_(True)
+
+    #     self._gc_activ = out_det
+
+    #     # forward hook은 return 값을 주면 "출력 교체"가 가능함
+    #     return out_det
+    def _gc_save_activation(self, module, input, output):
+        if not self._gc_enable:
             return
-        # Grad-CAM용 activation을 "그래프에 붙는" 텐서로 교체
-        out_det = output.detach()
-        out_det.requires_grad_(True)
-
-        self._gc_activ = out_det
-
-        # forward hook은 return 값을 주면 "출력 교체"가 가능함
-        return out_det
+        # conv0는 grad가 자연히 붙으므로 그대로 저장
+        self._gc_activ = output
+        # return None  (출력 교체 안 함)
 
     def forward(self, visual, audio, target_class=None, compute_gradcam=False):
         print("visual ", visual.shape)
@@ -202,7 +209,12 @@ class VAANet_intensity(VisualStream):
         grads = torch.autograd.grad(score, self._gc_activ, retain_graph=retain, create_graph=True)[0] #backward 정보 저장, 2차 미분 없이 일단 세팅
 
         A = self._gc_activ
-        if A.dim() == 5:
+        if A.dim() == 3:  # [N, C, m]
+            w = grads.mean(dim=2, keepdim=True)          # [N, C, 1]
+            cam_vec = torch.relu((w * A).sum(dim=1))     # [N, m]
+            hw = int(self.hp['hw'])  # 보통 4
+            cam2 = cam_vec.view(-1, hw, hw)              # [N, 4, 4]
+        elif A.dim() == 5:
             # [N, C, T, H, W]
             w = grads.mean(dim=(2, 3, 4), keepdim=True)
             cam3 = torch.relu((w * A).sum(dim=1))   # [N, T, H, W]
