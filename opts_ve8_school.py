@@ -28,7 +28,7 @@ def parse_opts():
                  type=str,
                  help='Local path of videos', ),
             dict(name="--annotation_path",
-                 default='ve8_01.json',
+                 default='/shared/home/affctiv/sumin/VAANet/tools/annotations/ve8/ve8_01.json',
                  type=str,
                  help='Local path of annotation file'),
             dict(name="--result_path",
