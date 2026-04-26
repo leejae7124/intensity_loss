@@ -1,7 +1,8 @@
 
 #saliency 적용
+import sys
+import argparse
 import torch
-from opts_tsl import parse_opts
 
 from core.model import generate_model_intensity
 from core.loss import get_loss
@@ -46,8 +47,26 @@ from tensorboardX import SummaryWriter
 #     print("std: ", std)
     
 #     return mean, std
+def load_parse_opts():
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--env", choices=["lab", "school"], default="lab")
+
+    args, remaining = bootstrap.parse_known_args()
+
+    # 나머지 인자들은 실제 opts parser로 넘기기 위해 sys.argv 재구성
+    sys.argv = [sys.argv[0]] + remaining
+
+    if args.env == "school":
+        print("school")
+        from opts_tsl_school import parse_opts
+    else:
+        print("lab")
+        from opts_tsl import parse_opts
+
+    return parse_opts
 
 def main():
+    parse_opts = load_parse_opts()
     opt = parse_opts()
     opt.device_ids = list(range(device_count()))
     local2global_path(opt)

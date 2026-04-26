@@ -68,7 +68,7 @@ def parse_opts():
                  default=12,
                  type=int),
             dict(name='--loss_func',
-                 default='ce',#test 시에는 ce loss로 수정해야 함
+                 default='ce_intensity',#test 시에는 ce loss로 수정해야 함
                  type=str,
                  help='ce | pcce_ve8'),
             dict(name='--learning_rate',
