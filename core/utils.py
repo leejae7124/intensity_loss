@@ -194,6 +194,11 @@ def run_model_loss(opt, inputs, model, criterion, i=0, print_attention=True, per
         align = criterion.intensity_loss(cam_map, saliency_map)       # RMSEL or Grad
         lam = float(getattr(criterion, "lambda_intensity", 1.0))
         loss = cls + lam * align
+
+        if (i % period) == 0:
+            ratio = (lam * align / (cls + 1e-12)).item()
+            print(f"[loss] cls={cls.item():.4f}  align={align.item():.4f}  "
+                f"lambda={lam:.3f}  total={loss.item():.4f}  (lam*align/cls={ratio:.3f})")
         # loss = criterion(y_pred, target, cam_map=cam_map, saliency_map=saliency_map)
     else:
         # val/test 또는 CE-only 상황
