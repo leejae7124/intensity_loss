@@ -189,7 +189,12 @@ def run_model_loss(opt, inputs, model, criterion, i=0, print_attention=True, per
         y_pred, alpha, beta, gamma, cam_map = model(
             visual, audio, target_class=target, compute_gradcam=True
         )
-        loss = criterion(y_pred, target, cam_map=cam_map, saliency_map=saliency_map)
+        # 2) loss 항 분리 계산 (한 번만 계산)
+        cls = criterion.cls_loss(y_pred, target)                      # CE
+        align = criterion.intensity_loss(cam_map, saliency_map)       # RMSEL or Grad
+        lam = float(getattr(criterion, "lambda_intensity", 1.0))
+        loss = cls + lam * align
+        # loss = criterion(y_pred, target, cam_map=cam_map, saliency_map=saliency_map)
     else:
         # val/test 또는 CE-only 상황
         y_pred, alpha, beta, gamma = model(visual, audio, compute_gradcam=False)

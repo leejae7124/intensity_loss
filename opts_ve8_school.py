@@ -12,7 +12,7 @@ def parse_opts():
         ],
         'paths': [
             dict(name='--resnet101_pretrained',
-                 default='./resnet-101-kinetics.pth',
+                 default='/shared/home/affctiv/sumin/VAANet/resnet-101-kinetics.pth',
                  type=str,
                  help='Global path of pretrained 3d resnet101 model (.pth)'),
             dict(name='--checkpoint_path',
