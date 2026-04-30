@@ -53,8 +53,10 @@ def train_epoch(epoch, data_loader, model, criterion, optimizer, opt, class_name
     print('Training at epoch {}'.format(epoch))
 
     # epoch 시작 직후, epoch 단위 CAM 통계를 쓰기 위한 작업.
-    if opt.loss_func == "ce_intensity":
+    if opt.loss_func.startswith("ce_intensity"):
         criterion.intensity_loss.begin_epoch(epoch)
+
+        
 
     model.train()
 
@@ -81,8 +83,8 @@ def train_epoch(epoch, data_loader, model, criterion, optimizer, opt, class_name
         data_time.update(time.time() - end_time)
 
         # warmup_epoch는 1로 둔다고 가정 (epoch 번호가 1부터 시작하므로 epoch==1이 첫 epoch)
-        warmup = (opt.loss_func == "ce_intensity" and epoch == 1)
-
+        #warmup = (opt.loss_func == "ce_intensity" and epoch == 1)
+        warmup = (opt.loss_func.startswith("ce_intensity") and epoch == 1) #cam 통계만 쌓고, 업데이트는 ce로만 하자.
         if warmup:
             # 1) CAM 생성 (grad enabled 상태, model.train 상태)
             y_pred, alpha, beta, gamma, cam_map = model(
@@ -170,7 +172,7 @@ def train_epoch(epoch, data_loader, model, criterion, optimizer, opt, class_name
                 epoch, i + 1, len(data_loader), batch_time=batch_time, data_time=data_time, loss=losses, acc=accuracies))
         
     # epoch 끝
-    if opt.loss_func == "ce_intensity":
+    if opt.loss_func.startswith("ce_intensity"):
         criterion.intensity_loss.end_epoch()
 
     # ---------------------------------------------------------------------- #

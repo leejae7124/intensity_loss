@@ -61,7 +61,7 @@ def load_parse_opts():
         from opts_ve8_school import parse_opts
     else:
         print("lab")
-        from opts_tsl import parse_opts
+        from opts_ve8 import parse_opts
 
     return parse_opts
 

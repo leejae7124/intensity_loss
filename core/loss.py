@@ -1,5 +1,5 @@
 import torch.nn as nn
-import torch.nn.functional as f
+import torch.nn.functional as F
 from torch import Tensor
 import torch
 import numpy as np
@@ -52,6 +52,17 @@ class PCCEVE8(nn.Module):
         return out
 
 #추가한 함수, Intensity loss + CE loss
+
+def _downsample_to(cam_map, sal_map, align_hw=56):
+    # cam_map, sal_map: [B,S,1,H,W]
+    B, S, _, Hc, Wc = cam_map.shape
+    cam_ = cam_map.view(B*S, 1, Hc, Wc)
+    sal_ = sal_map.view(B*S, 1, Hc, Wc)
+    cam_ = F.interpolate(cam_, size=(align_hw, align_hw), mode="bilinear", align_corners=False)
+    sal_ = F.interpolate(sal_, size=(align_hw, align_hw), mode="bilinear", align_corners=False)
+    cam_map = cam_.view(B, S, 1, align_hw, align_hw)
+    sal_map = sal_.view(B, S, 1, align_hw, align_hw)
+    return cam_map, sal_map
 
 
 class Intensity(nn.Module):
@@ -171,13 +182,15 @@ class Intensity(nn.Module):
         if sal_map.dim() == 6:
             sal_map = sal_map.mean(dim=3)
             print("sal dim 6")
+        
+        print("cam shape(loss func): ", cam_map.shape)
 
         # ---- 해상도 맞추기: saliency -> cam 해상도 ----
         B, S, _, Hc, Wc = cam_map.shape
         _, _, _, Hs, Ws = sal_map.shape
         if (Hs, Ws) != (Hc, Wc): #CAM과 Saliency의 H, W 비교
             sal_ = sal_map.view(B * S, 1, Hs, Ws) #view(): 텐서의 모양(shape)만 바꾸는 함수. interpolate()가 이 형식으로 받는 것을 기대함.
-            sal_ = f.interpolate(sal_, size=(Hc, Wc), mode="bilinear", align_corners=False)  # 텐서를 원하는 크기로 리사이즈(업, 다운샘플링)하는 함수. saliency처럼 연속적인 값에는 보통 bilinear가 잘 맞는다.
+            sal_ = F.interpolate(sal_, size=(Hc, Wc), mode="bilinear", align_corners=False)  # 텐서를 원하는 크기로 리사이즈(업, 다운샘플링)하는 함수. saliency처럼 연속적인 값에는 보통 bilinear가 잘 맞는다.
             sal_map = sal_.view(B, S, 1, Hc, Wc) #다시 원래 모양으로 돌림
 
         # ---- CAM calibration (epoch 통계 기반) ----
@@ -188,9 +201,6 @@ class Intensity(nn.Module):
         sal = sal_map.clamp_min(self.eps)
         return (torch.log(cam) - torch.log(sal)).abs().mean() #RMSEL 식
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 class IntensityGrad(Intensity):
     """
@@ -243,6 +253,7 @@ class IntensityGrad(Intensity):
             sal_map = sal_.view(B, S, 1, Hc, Wc)
 
         # ---- CAM calibration (epoch_p95 등 기존 그대로) ----
+        # cam_map, sal_map = _downsample_to(cam_map, sal_map, align_hw=56)
         cam_map = self._calibrate_cam(cam_map)
 
         # ---- Gradient loss only (Sobel) ----
@@ -250,6 +261,109 @@ class IntensityGrad(Intensity):
         gx_s, gy_s = self._sobel(sal_map)
 
         loss = (gx_c - gx_s).abs().mean() + (gy_c - gy_s).abs().mean()
+        return loss
+
+class IntensityNormal(Intensity):
+    """
+    Surface normal-only align loss
+    - Intensity의 shape 정리/resize/cam calibration(epoch_p95 등) 로직 그대로 재사용
+    - 2D map을 height field로 보고, (dx,dy)로 normal을 만든 뒤 cosine loss로 정렬
+    """
+
+    def __init__(self, *args,
+                 diff: str = "central",   # "central" | "sobel"
+                 z: float = 1.0,          # normal의 z 성분(기울기 민감도 조절)
+                 eps_n: float = 1e-6,
+                 **kwargs):
+        super().__init__(*args, **kwargs)
+        self.diff = diff
+        self.z = z
+        self.eps_n = eps_n
+
+        if diff == "central":
+            # 중앙차분(가볍고 스케일이 덜 큼)
+            kx = torch.tensor([[0., 0., 0.],
+                               [-1., 0., 1.],
+                               [0., 0., 0.]], dtype=torch.float32).view(1, 1, 3, 3) * 0.5
+            ky = torch.tensor([[0., -1., 0.],
+                               [0.,  0., 0.],
+                               [0.,  1., 0.]], dtype=torch.float32).view(1, 1, 3, 3) * 0.5
+        elif diff == "sobel":
+            # Sobel(엣지 민감, 출력이 더 큼)
+            kx = torch.tensor([[-1., 0., 1.],
+                               [-2., 0., 2.],
+                               [-1., 0., 1.]], dtype=torch.float32).view(1, 1, 3, 3)
+            ky = torch.tensor([[-1., -2., -1.],
+                               [ 0.,  0.,  0.],
+                               [ 1.,  2.,  1.]], dtype=torch.float32).view(1, 1, 3, 3)
+            # 필요하면 여기서 /8 같은 정규화도 가능 (원하면 추가)
+        else:
+            raise ValueError(f"Unknown diff={diff}")
+
+        self.register_buffer("kx", kx)
+        self.register_buffer("ky", ky)
+
+    def _grads(self, x_5d: torch.Tensor):
+        """
+        x_5d: [B,S,1,H,W]
+        return: dx, dy each [B,S,1,H,W]
+        """
+        B, S, _, H, W = x_5d.shape
+        x = x_5d.view(B * S, 1, H, W)
+        dx = F.conv2d(x, self.kx, padding=1)
+        dy = F.conv2d(x, self.ky, padding=1)
+        dx = dx.view(B, S, 1, H, W)
+        dy = dy.view(B, S, 1, H, W)
+        return dx, dy
+
+    def _normals(self, x_5d: torch.Tensor):
+        """
+        x_5d: [B,S,1,H,W]
+        return: n [B,S,3,H,W] (unit normal)
+        """
+        dx, dy = self._grads(x_5d)
+        B, S, _, H, W = x_5d.shape
+        nz = torch.ones((B, S, 1, H, W), device=x_5d.device, dtype=x_5d.dtype)
+
+        n = torch.cat([-dx, -dy, nz], dim=2)  # [B,S,3,H,W]
+        n = n / (torch.linalg.norm(n, dim=2, keepdim=True) + self.eps_n)
+        return n
+
+    def forward(self, cam_map, sal_map):
+        # ---- shape 통일 ----
+        if cam_map.dim() == 4:  # [B,S,H,W]
+            cam_map = cam_map.unsqueeze(2)
+        if sal_map.dim() == 4:
+            sal_map = sal_map.unsqueeze(2)
+        if sal_map.dim() == 6:  # [B,S,1,D,H,W] -> snippet 내부 평균
+            sal_map = sal_map.mean(dim=3)
+
+        # ---- 해상도 맞추기: saliency -> cam ----
+        B, S, _, Hc, Wc = cam_map.shape
+        _, _, _, Hs, Ws = sal_map.shape
+        if (Hs, Ws) != (Hc, Wc):
+            sal_ = sal_map.view(B * S, 1, Hs, Ws)
+            sal_ = F.interpolate(sal_, size=(Hc, Wc), mode="bilinear", align_corners=False)
+            sal_map = sal_.view(B, S, 1, Hc, Wc)
+
+        # ---- CAM calibration(너의 epoch_p95 등) ----
+        # cam_map, sal_map = _downsample_to(cam_map, sal_map, align_hw=56)
+        cam_map = self._calibrate_cam(cam_map)
+
+        # ✅ 여기(= n_cam 만들기 직전)에 넣기
+        dx_c, dy_c = self._grads(cam_map)
+        dx_s, dy_s = self._grads(sal_map)
+        print("[∇] mean|dx_cam|", dx_c.abs().mean().item(),
+            "mean|dy_cam|", dy_c.abs().mean().item(),
+            "mean|dx_sal|", dx_s.abs().mean().item(),
+            "mean|dy_sal|", dy_s.abs().mean().item())
+
+        # ---- surface normal loss ----
+        n_cam = self._normals(cam_map)  # [B,S,3,H,W]
+        n_sal = self._normals(sal_map)
+
+        cos = (n_cam * n_sal).sum(dim=2).clamp(-1.0, 1.0)  # [B,S,H,W]
+        loss = (1.0 - cos).mean()
         return loss
     
 class Intensity_CE(nn.Module):
@@ -267,10 +381,155 @@ class Intensity_CE(nn.Module):
         if self.lambda_intensity > 0: #lambda가 0 이상일 때만 호출.
             if cam_map is None or saliency_map is None:
                 raise RuntimeError("ce_intensity 모드인데 cam_map/saliency_map이 전달되지 않았습니다.")
+            print("cam shape(loss func): ", cam_map.shape)
             align = self.intensity_loss(cam_map, saliency_map)
             return cls + self.lambda_intensity * align
+        print("***********************************")
 
         return cls
+
+class IntensityCombo(nn.Module):
+    """
+    Combine existing align losses (e.g., RMSEL + Normal) without rewriting them.
+    - Uses existing Intensity / IntensityNormal modules as-is
+    - Stores last_terms for logging
+    """
+    def __init__(self, rmse_loss: nn.Module, normal_loss: nn.Module,
+                 w_rmse: float = 1.0, w_normal: float = 1.0):
+        super().__init__()
+        self.rmse_loss = rmse_loss
+        self.normal_loss = normal_loss
+        self.w_rmse = w_rmse
+        self.w_normal = w_normal
+        self.last_terms = {}
+
+    def begin_epoch(self, epoch: int):
+        # epoch_p95 통계 수집이 둘 다 켜져있으면 둘 다 begin_epoch 호출
+        if hasattr(self.rmse_loss, "begin_epoch"):
+            self.rmse_loss.begin_epoch(epoch)
+        if hasattr(self.normal_loss, "begin_epoch"):
+            self.normal_loss.begin_epoch(epoch)
+
+    @torch.no_grad()
+    def end_epoch(self):
+        if hasattr(self.rmse_loss, "end_epoch"):
+            self.rmse_loss.end_epoch()
+        if hasattr(self.normal_loss, "end_epoch"):
+            self.normal_loss.end_epoch()
+
+    def forward(self, cam_map, sal_map):
+        rmse = self.rmse_loss(cam_map, sal_map)
+        normal = self.normal_loss(cam_map, sal_map)
+        total = self.w_rmse * rmse + self.w_normal * normal
+
+        self.last_terms = {
+            "rmse": float(rmse.detach().item()),
+            "normal": float(normal.detach().item()),
+            "total": float(total.detach().item()),
+        }
+        return total
+
+# loss.py 안에 추가 (Intensity/IntensityGrad/IntensityNormal 아래쪽에 두면 됨)
+
+class IntensityAll(IntensityNormal):
+    """
+    RMSEL + Grad + Normal을 한 번에 계산하는 align loss
+    - preprocess/resize/downsample/calibration을 1회만 수행
+    - last_terms에 각 항을 저장해서 로깅 가능
+    """
+    def __init__(
+        self,
+        *args,
+        w_rmse: float = 1.0,
+        w_grad: float = 1.0,
+        w_normal: float = 1.0,
+        align_hw: int = 56,              # 세 항 동일 해상도 권장
+        sobel_norm: float = 1.0/8.0,     # grad 항 스케일
+        **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+        self.w_rmse = w_rmse
+        self.w_grad = w_grad
+        self.w_normal = w_normal
+        self.align_hw = align_hw
+
+        # Sobel kernel (Grad loss용)
+        kx = torch.tensor([[-1., 0., 1.],
+                           [-2., 0., 2.],
+                           [-1., 0., 1.]], dtype=torch.float32).view(1, 1, 3, 3)
+        ky = torch.tensor([[-1., -2., -1.],
+                           [ 0.,  0.,  0.],
+                           [ 1.,  2.,  1.]], dtype=torch.float32).view(1, 1, 3, 3)
+        self.register_buffer("sobel_x", kx)
+        self.register_buffer("sobel_y", ky)
+        self.sobel_norm = sobel_norm
+
+        self.last_terms = {}
+
+    def _sobel(self, x_5d: torch.Tensor):
+        B, S, _, H, W = x_5d.shape
+        x = x_5d.view(B * S, 1, H, W)
+        gx = F.conv2d(x, self.sobel_x, padding=1) * self.sobel_norm
+        gy = F.conv2d(x, self.sobel_y, padding=1) * self.sobel_norm
+        return gx.view(B, S, 1, H, W), gy.view(B, S, 1, H, W)
+
+    def forward(self, cam_map, sal_map):
+        # ---- shape 통일 ----
+        if cam_map.dim() == 4:  # [B,S,H,W]
+            cam_map = cam_map.unsqueeze(2)
+        if sal_map.dim() == 4:
+            sal_map = sal_map.unsqueeze(2)
+        if sal_map.dim() == 6:  # [B,S,1,D,H,W] -> snippet mean
+            sal_map = sal_map.mean(dim=3)
+
+        # ---- 해상도 맞추기: saliency -> cam ----
+        B, S, _, Hc, Wc = cam_map.shape
+        _, _, _, Hs, Ws = sal_map.shape
+        if (Hs, Ws) != (Hc, Wc):
+            sal_ = sal_map.view(B * S, 1, Hs, Ws)
+            sal_ = F.interpolate(sal_, size=(Hc, Wc), mode="bilinear", align_corners=False)
+            sal_map = sal_.view(B, S, 1, Hc, Wc)
+
+        # ---- (선택) 공통 downsample ----
+        if self.align_hw is not None and (Hc != self.align_hw or Wc != self.align_hw):
+            cam_map, sal_map = _downsample_to(cam_map, sal_map, align_hw=self.align_hw)
+
+        # ---- CAM calibration (epoch_p95 등) 1회만 ----
+        cam_map = self._calibrate_cam(cam_map)
+
+        # ---- RMSEL ----
+        cam = cam_map.clamp_min(self.eps)
+        sal = sal_map.clamp_min(self.eps)
+        rmse = (torch.log(cam) - torch.log(sal)).abs().mean()
+
+        # ---- Grad ----
+        gx_c, gy_c = self._sobel(cam_map)
+        gx_s, gy_s = self._sobel(sal_map)
+        grad = (gx_c - gx_s).abs().mean() + (gy_c - gy_s).abs().mean()
+
+        # ---- Normal ----
+        # z가 실제로 영향 주도록: (기존 IntensityNormal은 z가 안 쓰이는 상태였음)
+        dx_c, dy_c = self._grads(cam_map)
+        dx_s, dy_s = self._grads(sal_map)
+        nz = self.z * torch.ones((B, S, 1, cam_map.size(-2), cam_map.size(-1)),
+                                 device=cam_map.device, dtype=cam_map.dtype)
+        n_cam = torch.cat([-dx_c, -dy_c, nz], dim=2)
+        n_sal = torch.cat([-dx_s, -dy_s, nz], dim=2)
+        n_cam = n_cam / (torch.linalg.norm(n_cam, dim=2, keepdim=True) + self.eps_n)
+        n_sal = n_sal / (torch.linalg.norm(n_sal, dim=2, keepdim=True) + self.eps_n)
+        cos = (n_cam * n_sal).sum(dim=2).clamp(-1.0, 1.0)
+        normal = (1.0 - cos).mean()
+
+        total = self.w_rmse * rmse + self.w_grad * grad + self.w_normal * normal
+
+        # 로깅용 저장
+        self.last_terms = {
+            "rmse": float(rmse.detach().item()),
+            "grad": float(grad.detach().item()),
+            "normal": float(normal.detach().item()),
+            "total": float(total.detach().item()),
+        }
+        return total
 
 
 def get_loss(opt):
@@ -297,6 +556,60 @@ def get_loss(opt):
             update_every_epochs=getattr(opt, "cam_update_every_epochs", 1),
             clamp_max=getattr(opt, "cam_clamp_max", None),
         )
-        return Intensity_CE(cls, intensity, lambda_intensity=getattr(opt, "lambda_intensity", 10.0))
+        return Intensity_CE(cls, intensity, lambda_intensity=getattr(opt, "lambda_intensity", 1.0))
+    elif opt.loss_func == "ce_intensity_normal":
+        print("ce_intensity_normal")
+        cls = nn.CrossEntropyLoss()
+        intensity = IntensityNormal(
+            cam_calib="epoch_p95",
+            q=getattr(opt, "cam_q", 0.95),
+            update_every_epochs=getattr(opt, "cam_update_every_epochs", 1),
+            clamp_max=getattr(opt, "cam_clamp_max", None),
+            diff=getattr(opt, "normal_diff", "central"),  # central / sobel
+            z=getattr(opt, "normal_z", 1.0),
+        )
+        return Intensity_CE(cls, intensity, lambda_intensity=getattr(opt, "lambda_intensity", 1.0))
+    elif opt.loss_func == "ce_intensity_rmse_normal":
+        cls = nn.CrossEntropyLoss()
+
+        rmse = Intensity(
+            cam_calib="epoch_p95",
+            q=getattr(opt, "cam_q", 0.95),
+            update_every_epochs=getattr(opt, "cam_update_every_epochs", 1),
+            clamp_max=getattr(opt, "cam_clamp_max", None),
+        )
+
+        normal = IntensityNormal(
+            cam_calib=getattr(opt, "normal_cam_calib", "none"),  # 기본 none 추천
+            q=getattr(opt, "cam_q", 0.95),
+            update_every_epochs=getattr(opt, "cam_update_every_epochs", 1),
+            clamp_max=getattr(opt, "cam_clamp_max", None),
+            diff=getattr(opt, "normal_diff", "central"),
+            z=getattr(opt, "normal_z", 1.0),
+        )
+
+        combo = IntensityCombo(
+            rmse_loss=rmse,
+            normal_loss=normal,
+            w_rmse=getattr(opt, "w_rmse", 1.0),
+            w_normal=getattr(opt, "w_normal", 1.0),
+        )
+
+        return Intensity_CE(cls, combo, lambda_intensity=getattr(opt, "lambda_intensity", 1.0))
+    elif opt.loss_func == "ce_intensity_all":
+        cls = nn.CrossEntropyLoss()
+        intensity = IntensityAll(
+            cam_calib="epoch_p95",
+            q=getattr(opt, "cam_q", 0.95),
+            update_every_epochs=getattr(opt, "cam_update_every_epochs", 1),
+            clamp_max=getattr(opt, "cam_clamp_max", None),
+            diff=getattr(opt, "normal_diff", "central"),
+            z=getattr(opt, "normal_z", 1.0),
+            align_hw=getattr(opt, "align_hw", None),
+            w_rmse=getattr(opt, "w_rmse", 1.0),
+            w_grad=getattr(opt, "w_grad", 0.0),
+            w_normal=getattr(opt, "w_normal", 1.0),
+        )
+        return Intensity_CE(cls, intensity, lambda_intensity=getattr(opt, "lambda_intensity", 1.0))
     else:
         raise Exception

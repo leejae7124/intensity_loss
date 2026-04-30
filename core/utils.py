@@ -190,7 +190,7 @@ def run_model_loss(opt, inputs, model, criterion, i=0, print_attention=True, per
             visual, audio, target_class=target, compute_gradcam=True
         )
         # 2) loss 항 분리 계산 (한 번만 계산)
-        cls = criterion.cls_loss(y_pred, target)                      # CE
+        cls = criterion.cls_loss(y_pred, target)                      # CE, criterion은 get_loss()가 리턴한 객체. 따라서, 그 객체의 메서드를 부르는 것.
         align = criterion.intensity_loss(cam_map, saliency_map)       # RMSEL or Grad
         lam = float(getattr(criterion, "lambda_intensity", 1.0))
         loss = cls + lam * align
